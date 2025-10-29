@@ -1,8 +1,12 @@
 from langchain_ollama.llms import OllamaLLM
 from langchain_core.prompts import PromptTemplate
-from vectorStore import vectorstore
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_ollama.embeddings import OllamaEmbeddings
+from langchain_chroma import Chroma
 
 import streamlit as st
+import tempfile
 
 st.set_page_config(page_title='CVBot', page_icon='🧠', layout='centered')
 st.title('CVBot - Assistant for CV-based Q&A')
@@ -28,47 +32,70 @@ def load_model(temperature: float):
     return model
 
 model = load_model(temperature=temperature)
+embeddings = OllamaEmbeddings(model='mxbai-embed-large')
 
-with st.expander('Add manual context (optional)'):
-    manual_context = st.text_area(
-        'Add any extra context you want the model to know before reading your CV:',
-        placeholder='Example: This CV belongs to a software engineer specialized in data science...',
-        height=150
+# ===== CV Upload =====
+uploaded_file = st.file_uploader('Attach your CV (PDF)', type=['pdf'])
+cv_split = None
+if uploaded_file is not None:
+    # Save temporaly the PDF uploaded
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        tmp_path = tmp_file.name
+    pdfLoader = PyPDFLoader(file_path=tmp_path)
+    docs = pdfLoader.load()
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=20)
+    cv_split = splitter.split_documents(documents=docs)
+    vectorstore = Chroma.from_documents(
+        documents=cv_split,
+        embedding=embeddings,
+        persist_directory='./CVBot/chroma_cv'
     )
 
-question = st.text_input('Ask your question to the CVBot:')
+    st.success('CV loaded successfully!')
 
-if st.button('Ask CVBot'):
-    if not question.strip():
-        st.warning('Please write a question first.')
-    else:
-        base_context = """
-        Behave like you are the person from the CV below:
+    # ===== CHATBOT =====
 
-        CV (curriculum viate): {CV}
-
-        Respond the question below, and treat me with 'Sir'. Be brief and concise.
-
-        Question: {question}
-        """
-
-        if manual_context and manual_context.lower != 'no':
-            context = manual_context + "\n" + base_context
-        else:
-            context = base_context
-
-    template = PromptTemplate.from_template(context)
-
-    with st.spinner('Searching CV and generating answer...'):
-        relevant_documentation = vectorstore.similarity_search(query=question, k=k_value)
-        cv = "\n\n".join([doc.page_content for doc in relevant_documentation])
-        prompt = template.invoke(
-            {
-                'CV': cv,
-                'question': question
-            }
+    with st.expander('Add manual context (optional)'):
+        manual_context = st.text_area(
+            'Add any extra context you want the model to know before reading your CV:',
+            placeholder='Example: This CV belongs to a software engineer specialized in data science...',
+            height=150
         )
-        answer = model.invoke(prompt)
-    
-    st.subheader("CVBot's Answer:")
-    st.success(answer)
+
+    question = st.text_input('Ask your question to the CVBot:')
+
+    if st.button('Ask CVBot'):
+        if not question.strip():
+            st.warning('Please write a question first.')
+        else:
+            base_context = """
+            Behave like you are the person from the CV below:
+
+            CV (curriculum viate): {CV}
+
+            Respond the question below, and treat me with 'Sir'. Be brief and concise.
+
+            Question: {question}
+            """
+
+            if manual_context and manual_context.lower != 'no':
+                context = manual_context + "\n" + base_context
+            else:
+                context = base_context
+
+        template = PromptTemplate.from_template(context)
+
+        with st.spinner('Searching CV and generating answer...'):
+            relevant_documentation = vectorstore.similarity_search(query=question, k=k_value)
+            cv = "\n\n".join([doc.page_content for doc in relevant_documentation])
+            prompt = template.invoke(
+                {
+                    'CV': cv,
+                    'question': question
+                }
+            )
+            answer = model.invoke(prompt)
+        
+        st.subheader("CVBot's Answer:")
+        st.success(answer)
